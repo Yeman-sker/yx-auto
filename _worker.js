@@ -36,6 +36,46 @@ const directDomains = [
 const defaultIPURL = 'https://raw.githubusercontent.com/qwer-search/bestip/refs/heads/main/kejilandbestip.txt';
 
 // UUID验证
+
+
+// 仅保留 Cloudflare Anycast IP；避免 GitHub/第三方优选列表混入 Alibaba/AWS 等非 CF IP，导致 TLS 证书 -1
+const CF_IPV4_CIDRS = [
+    '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22',
+    '141.101.64.0/18', '108.162.192.0/18', '190.93.240.0/20', '188.114.96.0/20',
+    '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
+    '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22'
+];
+const CF_IPV6_PREFIXES = ['2400:cb00:', '2606:4700:', '2803:f800:', '2405:b500:', '2405:8100:', '2a06:98c0:', '2c0f:f248:'];
+
+function normalizeHostname(host) {
+    return String(host || '').trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '').replace(/:\d+$/, '');
+}
+
+function ipv4ToInt(ip) {
+    const parts = String(ip).split('.').map(Number);
+    if (parts.length !== 4 || parts.some(n => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+    return (((parts[0] << 24) >>> 0) + (parts[1] << 16) + (parts[2] << 8) + parts[3]) >>> 0;
+}
+
+function ipv4InCidr(ip, cidr) {
+    const [base, bitsRaw] = cidr.split('/');
+    const bits = Number(bitsRaw);
+    const ipInt = ipv4ToInt(ip), baseInt = ipv4ToInt(base);
+    if (ipInt === null || baseInt === null) return false;
+    const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+    return (ipInt & mask) === (baseInt & mask);
+}
+
+function isCloudflareLiteralIP(host) {
+    const clean = normalizeHostname(String(host || '').replace(/[\[\]]/g, ''));
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(clean)) return CF_IPV4_CIDRS.some(cidr => ipv4InCidr(clean, cidr));
+    if (clean.includes(':')) {
+        const lower = clean.toLowerCase();
+        return CF_IPV6_PREFIXES.some(prefix => lower.startsWith(prefix));
+    }
+    return true; // 域名不在这里过滤
+}
+
 function isValidUUID(str) {
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     return uuidRegex.test(str);
@@ -266,6 +306,7 @@ function generateLinksFromSource(list, user, workerDomain, disableNonTLS = false
     const proto = 'vless';
 
     list.forEach(item => {
+        if (item.ip && !isCloudflareLiteralIP(item.ip)) return;
         let nodeNameBase = item.isp ? item.isp.replace(/\s/g, '_') : (item.name || item.domain || item.ip);
         if (item.colo && item.colo.trim()) {
             nodeNameBase = `${nodeNameBase}-${item.colo.trim()}`;
@@ -476,7 +517,8 @@ function generateLinksFromNewIPs(list, user, workerDomain, customPath = '/', ech
     const echSuffix = echConfig ? `&alpn=h3%2Ch2%2Chttp%2F1.1&ech=${encodeURIComponent(echConfig)}` : '';
     
     list.forEach(item => {
-        const nodeName = item.name.replace(/\s/g, '_');
+        if (!isCloudflareLiteralIP(item.ip)) return;
+        const nodeName = String(item.name || item.ip).replace(/\s/g, '_');
         const port = item.port;
         
         if (CF_HTTPS_PORTS.includes(port)) {
@@ -500,8 +542,8 @@ function generateLinksFromNewIPs(list, user, workerDomain, customPath = '/', ech
 async function handleSubscriptionRequest(request, user, customDomain, piu, ipv4Enabled, ipv6Enabled, ispMobile, ispUnicom, ispTelecom, evEnabled, etEnabled, vmEnabled, disableNonTLS, customPath, echConfig = null) {
     const url = new URL(request.url);
     const finalLinks = [];
-    const workerDomain = url.hostname;  // workerDomain始终是请求的hostname
-    const nodeDomain = customDomain || url.hostname;  // 用户输入的域名用于生成节点时的host/sni
+    const workerDomain = normalizeHostname(url.hostname);  // workerDomain始终是请求的hostname
+    const nodeDomain = normalizeHostname(customDomain || url.hostname);  // 用户输入的域名用于生成节点时的host/sni
     const target = url.searchParams.get('target') || 'base64';
     const wsPath = customPath || '/';
 
